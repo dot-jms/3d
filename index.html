@@ -332,8 +332,10 @@ for(let i=0;i<NUM_WORKERS;i++){
     });
 }
 
-// ImageData backed directly by the shared pixel buffer - zero copy blit
-const imgData = new ImageData(new Uint8ClampedArray(sharedPixelBuf), R_WIDTH, R_HEIGHT);
+// ImageData must use a non-shared buffer — copy from shared each frame
+const sharedPixelsView = new Uint8ClampedArray(sharedPixelBuf);
+const localPixelBuf = new Uint8ClampedArray(R_WIDTH * R_HEIGHT * 4);
+const imgData = new ImageData(localPixelBuf, R_WIDTH, R_HEIGHT);
 
 function draw(){
     updatePhysics();
@@ -355,7 +357,8 @@ function draw(){
         while(Atomics.load(stateI32, 20+i)!==0){}
     }
 
-    // Blit shared pixels straight to canvas - no copy
+    // Copy shared pixels into local buffer, then blit to canvas
+    localPixelBuf.set(sharedPixelsView);
     ctx.putImageData(imgData, 0, 0);
     requestAnimationFrame(draw);
 }
