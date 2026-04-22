@@ -291,45 +291,43 @@ function updatePhysics(){
     }else{player.z=nZ;player.grounded=false;}
 }
 
-// FIX 2: Pre-compute sphere screen-space bounding box on the main thread once per frame.
+// Pre-compute sphere screen-space bounding box on the main thread once per frame.
 // Workers receive pixel-space min/max X/Y so they can skip sphere math for out-of-bounds pixels.
-function computeSphereScreenBounds(px, py, pz, yaw, pitch, sphX, sphY, sphZ, sphR, aspect, invRW, invRH) {
-    const cosYaw = Math.cos(yaw), sinYaw = Math.sin(yaw);
-    const cosPitch = Math.cos(pitch), sinPitch = Math.sin(pitch);
-    const dirX = cosYaw * cosPitch, dirY = sinYaw * cosPitch, dirZ = sinPitch;
-    const rightX = sinYaw, rightY = -cosYaw, rightZ = 0;
-    const upX = rightY*dirZ, upY = rightZ*dirX - rightX*dirZ, upZ = rightX*dirY - rightY*dirX;
-
+function computeSphereScreenBounds(dirX, dirY, dirZ, rightX, rightY, rightZ, upX, upY, upZ, aspect,
+                                    px, py, pz, sphX, sphY, sphZ, sphR) {
     // Vector from camera to sphere center
     const toCX = sphX - px, toCY = sphY - py, toCZ = sphZ - pz;
-    // Project onto camera axes
-    const dotDir   = toCX*dirX   + toCY*dirY   + toCZ*dirZ;
-    const dotRight = toCX*rightX + toCY*rightY + toCZ*rightZ;
-    const dotUp    = toCX*upX    + toCY*upY    + toCZ*upZ;
+    const dotDir = toCX*dirX + toCY*dirY + toCZ*dirZ;
 
-    // If sphere is behind camera, return null bounds (no pixels to test)
+    // Sphere fully behind camera — skip intersection for all pixels
     if (dotDir - sphR <= 0) {
         return { sphMinX: 0, sphMaxX: R_WIDTH - 1, sphMinY: 0, sphMaxY: R_HEIGHT - 1 };
     }
 
-    // Angular radius of sphere in view space
+    // Project sphere center onto right/up axes, then divide by forward distance (perspective divide)
+    const dotRight = toCX*rightX + toCY*rightY + toCZ*rightZ;
+    const dotUp    = toCX*upX    + toCY*upY    + toCZ*upZ;
+    const invDotDir = 1.0 / dotDir;
+    const centerU = dotRight * invDotDir;  // in view-space [-1..1] horizontal
+    const centerV = dotUp    * invDotDir;  // in view-space [-1..1] vertical
+
+    // Convert from view-space to pixel coords matching the renderer's UV formula:
+    //   u = (scanX * invRW - 1.0) * 0.8 * aspect  =>  scanX = (centerU/(0.8*aspect) + 1) * R_WIDTH/2
+    //   v = (1 - scanY * invRH) * 0.8             =>  scanY = (1 - centerV/0.8) * R_HEIGHT/2
+    const screenX = (centerU / (0.8 * aspect) + 1.0) * R_WIDTH  * 0.5;
+    const screenY = (1.0 - centerV / 0.8)             * R_HEIGHT * 0.5;
+
+    // Angular radius → pixel radius (conservative +30% margin)
     const dist = Math.sqrt(toCX*toCX + toCY*toCY + toCZ*toCZ);
     const angularR = sphR / dist;
-
-    // Project center to screen UV
-    const centerU = dotRight / dotDir;
-    const centerV = dotUp    / dotDir;
-    const screenU = (centerU / (0.8 * aspect) + 1.0) * R_WIDTH  * 0.5;
-    const screenV = (1.0 - centerV / 0.8)             * R_HEIGHT * 0.5;
-
-    // Screen-space radius (conservative, add 20% margin)
-    const pixelR = (angularR / (0.8 * Math.min(1.0, aspect))) * R_WIDTH * 1.2;
+    const pixelRX = (angularR / (0.8 * aspect)) * R_WIDTH  * 1.3;
+    const pixelRY = (angularR / 0.8)            * R_HEIGHT * 1.3;
 
     return {
-        sphMinX: Math.max(0,          (screenU - pixelR) | 0),
-        sphMaxX: Math.min(R_WIDTH-1,  (screenU + pixelR + 1) | 0),
-        sphMinY: Math.max(0,          (screenV - pixelR) | 0),
-        sphMaxY: Math.min(R_HEIGHT-1, (screenV + pixelR + 1) | 0),
+        sphMinX: Math.max(0,          (screenX - pixelRX) | 0),
+        sphMaxX: Math.min(R_WIDTH-1,  (screenX + pixelRX + 1) | 0),
+        sphMinY: Math.max(0,          (screenY - pixelRY) | 0),
+        sphMaxY: Math.min(R_HEIGHT-1, (screenY + pixelRY + 1) | 0),
     };
 }
 
@@ -401,7 +399,8 @@ function dispatchFrame() {
     const sphereC = ocX*ocX + ocY*ocY + ocZ*ocZ - sphR*sphR;
     const invRad = 1.0 / sphR;
 
-    const bounds = computeSphereScreenBounds(px, py, pz, yaw, pitch, sphX, sphY, sphZ, sphR, aspect, invRW, invRH);
+    const bounds = computeSphereScreenBounds(dirX, dirY, dirZ, rightX, rightY, rightZ, upX, upY, upZ, aspect,
+                                              px, py, pz, sphX, sphY, sphZ, sphR);
 
     const payload = {
         type: 'render',
