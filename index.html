@@ -337,33 +337,34 @@ const sharedPixelsView = new Uint8ClampedArray(sharedPixelBuf);
 const localPixelBuf = new Uint8ClampedArray(R_WIDTH * R_HEIGHT * 4);
 const imgData = new ImageData(localPixelBuf, R_WIDTH, R_HEIGHT);
 
-function draw(){
+function dispatchFrame() {
     updatePhysics();
 
-    // Write state for workers to read
     stateF64[0]=player.x; stateF64[1]=player.y; stateF64[2]=player.z;
     stateF64[3]=player.yaw; stateF64[4]=player.pitch;
     stateF64[5]=performance.now()*0.005;
     stateF64[6]=sphere.x; stateF64[7]=sphere.y; stateF64[8]=sphere.z; stateF64[9]=sphere.radius;
 
-    // Wake all workers at once
+    // Wake all workers
     for(let i=0;i<NUM_WORKERS;i++){
         Atomics.store(stateI32, 20+i, 1);
         Atomics.notify(stateI32, 20+i, 1);
     }
 
-    // Spin-wait for all workers to finish (very fast, sub-millisecond overhead)
+    // Wait for all workers asynchronously (main thread cannot block)
+    const waits = [];
     for(let i=0;i<NUM_WORKERS;i++){
-        while(Atomics.load(stateI32, 20+i)!==0){}
+        waits.push(Atomics.waitAsync(stateI32, 20+i, 1).value);
     }
 
-    // Copy shared pixels into local buffer, then blit to canvas
-    localPixelBuf.set(sharedPixelsView);
-    ctx.putImageData(imgData, 0, 0);
-    requestAnimationFrame(draw);
+    Promise.all(waits).then(() => {
+        localPixelBuf.set(sharedPixelsView);
+        ctx.putImageData(imgData, 0, 0);
+        requestAnimationFrame(dispatchFrame);
+    });
 }
 
-draw();
+dispatchFrame();
 </script>
 </body>
 </html>
