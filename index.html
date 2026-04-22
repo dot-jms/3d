@@ -21,6 +21,8 @@
     <b>RIGHT CLICK:</b> Place Box<br><br>
     <span style="color:#0ff">Multithreading Active</span>
 </div>
+<div id="errorLog" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.85);color:#f55;font-family:monospace;font-size:13px;padding:16px 20px;border:2px solid #f55;border-radius:8px;max-width:80vw;display:none;z-index:999;white-space:pre-wrap;"></div>
+<div id="diagLog" style="position:absolute;bottom:20px;left:20px;color:#0f0;font-family:monospace;font-size:12px;pointer-events:none;z-index:998;"></div>
 <div class="crosshair"></div>
 <canvas id="gameCanvas"></canvas>
 
@@ -156,6 +158,28 @@ function loop() {
 </script>
 
 <script>
+const errorLog = document.getElementById('errorLog');
+const diagLog = document.getElementById('diagLog');
+
+function showError(msg) {
+    errorLog.style.display = 'block';
+    errorLog.textContent += msg + '\n';
+}
+function showDiag(msg) {
+    diagLog.innerHTML += msg + '<br>';
+}
+
+window.onerror = (msg, src, line) => showError(`JS Error: ${msg}\nLine: ${line}`);
+window.onunhandledrejection = (e) => showError(`Promise Error: ${e.reason}`);
+
+// Diagnostics
+try {
+    showDiag('SharedArrayBuffer: ' + (typeof SharedArrayBuffer !== 'undefined' ? '✅' : '❌'));
+    showDiag('Atomics: ' + (typeof Atomics !== 'undefined' ? '✅' : '❌'));
+    showDiag('crossOriginIsolated: ' + (crossOriginIsolated ? '✅' : '❌'));
+    showDiag('Worker: ' + (typeof Worker !== 'undefined' ? '✅' : '❌'));
+} catch(e) { showError('Diag error: ' + e); }
+
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d', { alpha: false });
 const R_WIDTH = 640, R_HEIGHT = 360;
