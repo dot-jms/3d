@@ -57,6 +57,9 @@ function onRender(e) {
     const aspect=sharedParams[12], invRW=sharedParams[13], invRH=sharedParams[14];
     const ocX=sharedParams[15], ocY=sharedParams[16], ocZ=sharedParams[17];
     const sphereC=sharedParams[18], invRad=sharedParams[19];
+    const sphMinX=sharedParams[20], sphMaxX=sharedParams[21];
+    const sphMinY=sharedParams[22], sphMaxY=sharedParams[23];
+    const sphereVisible = sphMaxX >= sphMinX;
 
     const outsideSphere = sphereC > 0;
     const MWH = MW * MH;
@@ -65,6 +68,7 @@ function onRender(e) {
         const v = (1.0 - scanY * invRH) * 0.8;
         const rowBase = scanY * R_WIDTH;
 
+        const rowInSphereBand = sphereVisible && scanY >= sphMinY && scanY <= sphMaxY;
         for (let scanX = 0; scanX < R_WIDTH; scanX++) {
             const u = (scanX * invRW - 1.0) * 0.8 * aspect;
 
@@ -100,8 +104,9 @@ function onRender(e) {
 
             let finalColor = 0xFF000000;
 
-            const bDot = ocX*rdX + ocY*rdY + ocZ*rdZ;
-            if (!outsideSphere || bDot < 0) {
+            if (rowInSphereBand && scanX >= sphMinX && scanX <= sphMaxX) {
+                const bDot = ocX*rdX + ocY*rdY + ocZ*rdZ;
+                if (!outsideSphere || bDot < 0) {
                 const h = bDot*bDot - sphereC;
                 if (h > 0) {
                     const t = -bDot - Math.sqrt(h);
@@ -116,7 +121,8 @@ function onRender(e) {
                         hitBlock = -1;
                     }
                 }
-            }
+                } // !outsideSphere || bDot < 0
+            } // rowInSphereBand && bbox X
 
             if (hitBlock > 0) {
                 const hitX=px+rdX*dist, hitY=py+rdY*dist, hitZ=pz+rdZ*dist;
@@ -209,7 +215,7 @@ const sharedPixelView = new Uint8ClampedArray(sharedPixelBuf);
 const imgData = new ImageData(pixelReadBuf, R_WIDTH, R_HEIGHT);
 
 // Shared params buffer: workers read camera state from here each frame (no postMessage payload)
-const sharedParamsBuf = new SharedArrayBuffer(20 * 8); // 20 Float64s
+const sharedParamsBuf = new SharedArrayBuffer(24 * 8); // 24 Float64s
 const sharedParams = new Float64Array(sharedParamsBuf);
 
 const player={x:2.5,y:2.5,z:1.5,yaw:Math.PI/4,pitch:0,vz:0,grounded:false,radius:0.2,eyeHeight:0.8,height:1.2};
@@ -338,6 +344,37 @@ function dispatchFrame() {
     sharedParams[15]=ocX; sharedParams[16]=ocY; sharedParams[17]=ocZ;
     sharedParams[18]=ocX*ocX+ocY*ocY+ocZ*ocZ-sphR*sphR;
     sharedParams[19]=1.0/sphR;
+
+    // Compute sphere screen-space bounding box for early-out in workers
+    // Project sphere center into camera space
+    const aspect = R_WIDTH/R_HEIGHT;
+    const sCamDot = ocX*dirX + ocY*dirY + ocZ*dirZ; // negative = sphere is in front
+    const sFwd = -(ocX*dirX + ocY*dirY + ocZ*dirZ);
+    if (sFwd > 0.01) {
+        // Sphere center in view space
+        const sCamR = ocX*rightX + ocY*rightY + ocZ*rightZ;
+        const sCamU = ocX*upX + ocY*upY + ocZ*upZ;
+        // Angular radius: clamp so we always get a safe margin
+        const angRad = sphR / Math.max(sFwd - sphR, 0.1);
+        // Map to UV space: u = camR/(sFwd*0.8*aspect), v = camU/(sFwd*0.8)
+        const scaleU = 1.0 / (sFwd * 0.8 * aspect);
+        const scaleV = 1.0 / (sFwd * 0.8);
+        const marginU = angRad * scaleU * 1.5;
+        const marginV = angRad * scaleV * 1.5;
+        const centerU = sCamR * scaleU; // in [-1..1]
+        const centerV = sCamU * scaleV;
+        // Convert UV to pixel coords: scanX = (u+1)*R_WIDTH/2, scanY = (1-v)*R_HEIGHT/2
+        const minSX = Math.max(0,         ((centerU - marginU + 1) * R_WIDTH  * 0.5) | 0);
+        const maxSX = Math.min(R_WIDTH-1,  ((centerU + marginU + 1) * R_WIDTH  * 0.5) | 0);
+        const minSY = Math.max(0,         ((1 - (centerV + marginV)) * R_HEIGHT * 0.5) | 0);
+        const maxSY = Math.min(R_HEIGHT-1, ((1 - (centerV - marginV)) * R_HEIGHT * 0.5) | 0);
+        sharedParams[20]=minSX; sharedParams[21]=maxSX;
+        sharedParams[22]=minSY; sharedParams[23]=maxSY;
+    } else {
+        // Sphere behind camera — mark as invisible
+        sharedParams[20]=0; sharedParams[21]=-1;
+        sharedParams[22]=0; sharedParams[23]=-1;
+    }
 
     // Tiny message — just a string, no object serialization
     for(let i=0;i<NUM_WORKERS;i++) workers[i].postMessage('render');
