@@ -195,6 +195,11 @@ for (let y = 0; y < MATCAP_SIZE; y++) {
 const MW = 32, MH = 32, MD = 16;
 const world = new Uint8Array(MW * MH * MD);
 
+// Declared here so setBlock can reference workers during world generation below
+var workers = [];
+var workerBuffers = [];
+var workerEnds = [];
+
 function getBlock(x, y, z) { return (x<0 || x>=MW || y<0 || y>=MH || z<0 || z>=MD) ? 0 : world[x + y*MW + z*MW*MH]; }
 function setBlock(x, y, z, id) { 
     if(x>=0 && x<MW && y>=0 && y<MH && z>=0 && z<MD) {
@@ -289,17 +294,13 @@ function updatePhysics() {
 }
 
 /** * MULTI-THREADING INITIALIZATION */
-const workers = [];
-const workerBuffers = [];
-const workerEnds = [];
 let workersDone = 0;
 
 // Cap it at 8 cores to avoid thread thrashing
 const NUM_WORKERS = Math.min(8, navigator.hardwareConcurrency || 4);
 
-// This creates the parallel threads without needing external JS files
-let blob = new Blob([document.getElementById('workerCode').textContent], {type: 'application/javascript'});
-let workerURL = URL.createObjectURL(blob);
+// Use data URI instead of Blob URL to work on GitHub Pages (Blob URLs are blocked by CSP)
+let workerURL = 'data:application/javascript;base64,' + btoa(unescape(encodeURIComponent(document.getElementById('workerCode').textContent)));
 
 for (let i = 0; i < NUM_WORKERS; i++) {
     let worker = new Worker(workerURL);
@@ -336,8 +337,19 @@ for (let i = 0; i < NUM_WORKERS; i++) {
 }
 
 /** * VOXEL RAYTRACER RENDERING */
+// Recreates worker buffers each frame if ownership was transferred (merged fix)
+function updateBuffers() {
+    if (workerEnds.length === 0) return;
+    for (let i = 0; i < NUM_WORKERS; i++) {
+        if (!workerBuffers[i] || workerBuffers[i].byteLength === 0) {
+            workerBuffers[i] = new ArrayBuffer(R_WIDTH * workerEnds[i].sliceHeight * 4);
+        }
+    }
+}
+
 function draw() {
     updatePhysics();
+    updateBuffers();
 
     let magmaTexture = new Uint32Array(4096);
     let time = performance.now() * 0.005;
