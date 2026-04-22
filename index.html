@@ -9,6 +9,7 @@
         canvas { width: 100vw; height: 100vh; object-fit: cover; image-rendering: pixelated; cursor: crosshair; }
         .ui { position: absolute; top: 20px; left: 20px; color: white; font-family: monospace; font-size: 16px; text-shadow: 2px 2px 0 #000; pointer-events: none; }
         .crosshair { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: white; transform: translate(-50%, -50%); border-radius: 50%; pointer-events: none; mix-blend-mode: difference; }
+        #fps { position: absolute; top: 20px; right: 20px; color: #0f0; font-family: monospace; font-size: 14px; pointer-events: none; text-shadow: 1px 1px 0 #000; }
     </style>
 </head>
 <body>
@@ -21,8 +22,7 @@
     <b>RIGHT CLICK:</b> Place Box<br><br>
     <span style="color:#0ff">Multithreading Active</span>
 </div>
-<div id="errorLog" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.85);color:#f55;font-family:monospace;font-size:13px;padding:16px 20px;border:2px solid #f55;border-radius:8px;max-width:80vw;display:none;z-index:999;white-space:pre-wrap;"></div>
-<div id="diagLog" style="position:absolute;bottom:20px;left:20px;color:#0f0;font-family:monospace;font-size:12px;pointer-events:none;z-index:998;"></div>
+<div id="fps">-- FPS</div>
 <div class="crosshair"></div>
 <canvas id="gameCanvas"></canvas>
 
@@ -34,56 +34,56 @@ let myId, myStartY, myEndY;
 function ARGB(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
 
 self.onmessage = function(e) {
-    if (e.data.type !== 'init') return;
-    ({ R_WIDTH, R_HEIGHT, TEX_SIZE, MW, MH, MD, MATCAP_SIZE, myId, myStartY, myEndY } = e.data);
-    sharedPixels   = new Uint32Array(e.data.sharedPixels);
-    stateF64       = new Float64Array(e.data.sharedState);
-    stateI32       = new Int32Array(e.data.sharedState);
-    sharedWorld    = new Uint8Array(e.data.sharedWorld);
-    sharedTextures = new Uint32Array(e.data.sharedTextures);
-    sharedMatcap   = new Uint32Array(e.data.sharedMatcap);
-    loop();
+    const d = e.data;
+    if (d.type === 'init') {
+        ({ R_WIDTH, R_HEIGHT, TEX_SIZE, MW, MH, MD, MATCAP_SIZE, myId, myStartY, myEndY } = d);
+        sharedPixels   = new Uint32Array(d.sharedPixels);
+        stateF64       = new Float64Array(d.sharedState);
+        stateI32       = new Int32Array(d.sharedState);
+        sharedWorld    = new Uint8Array(d.sharedWorld);
+        sharedTextures = new Uint32Array(d.sharedTextures);
+        sharedMatcap   = new Uint32Array(d.sharedMatcap);
+        // Switch to render-on-demand mode
+        self.onmessage = onRender;
+    }
 };
 
-function loop() {
-    // Wait until main thread sets our flag to 1
-    Atomics.wait(stateI32, 20 + myId, 0);
+function onRender(e) {
+    if (e.data.type !== 'render') return;
+    const { px, py, pz, yaw, pitch, time, sphX, sphY, sphZ, sphR } = e.data;
 
-    const px    = stateF64[0], py = stateF64[1], pz = stateF64[2];
-    const yaw   = stateF64[3], pitch = stateF64[4];
-    const time  = stateF64[5];
-    const sphX  = stateF64[6], sphY = stateF64[7], sphZ = stateF64[8], sphR = stateF64[9];
-
-    // Animate magma texture directly in shared buffer - no copy needed
-    for (let i = 0; i < 4096; i++) {
-        const wave = Math.sin((i % 64) * 0.2 + time) + Math.cos((i >> 6) * 0.2 + time);
-        sharedTextures[i + 4 * 4096] = ARGB((200 + wave * 55) | 0, Math.max(0, (50 + wave * 25) | 0), 0);
+    // Only worker 0 animates magma texture
+    if (myId === 0) {
+        for (let i = 0; i < 4096; i++) {
+            const wave = Math.sin((i % 64) * 0.2 + time) + Math.cos((i >> 6) * 0.2 + time);
+            sharedTextures[i + 4 * 4096] = ARGB((200 + wave * 55) | 0, Math.max(0, (50 + wave * 25) | 0), 0);
+        }
     }
 
-    const dirX = Math.cos(yaw) * Math.cos(pitch);
-    const dirY = Math.sin(yaw) * Math.cos(pitch);
-    const dirZ = Math.sin(pitch);
-    const rightX = Math.sin(yaw), rightY = -Math.cos(yaw), rightZ = 0;
-    const upX = rightY*dirZ - rightZ*dirY;
-    const upY = rightZ*dirX - rightX*dirZ;
-    const upZ = rightX*dirY - rightY*dirX;
+    const cosYaw = Math.cos(yaw), sinYaw = Math.sin(yaw);
+    const cosPitch = Math.cos(pitch), sinPitch = Math.sin(pitch);
+    const dirX = cosYaw * cosPitch, dirY = sinYaw * cosPitch, dirZ = sinPitch;
+    const rightX = sinYaw, rightY = -cosYaw, rightZ = 0;
+    const upX = rightY*dirZ, upY = rightZ*dirX - rightX*dirZ, upZ = rightX*dirY - rightY*dirX;
     const aspect = R_WIDTH / R_HEIGHT;
+    const invRW = 2.0 / R_WIDTH, invRH = 2.0 / R_HEIGHT;
 
     const invRad = 1.0 / sphR;
     const ocX = px - sphX, ocY = py - sphY, ocZ = pz - sphZ;
     const sphereC = ocX*ocX + ocY*ocY + ocZ*ocZ - sphR*sphR;
 
     for (let scanY = myStartY; scanY < myEndY; scanY++) {
-        const v = (1.0 - 2.0 * scanY / R_HEIGHT) * 0.8;
+        const v = (1.0 - scanY * invRH) * 0.8;
+        const rowBase = scanY * R_WIDTH;
         for (let scanX = 0; scanX < R_WIDTH; scanX++) {
-            const u = (2.0 * scanX / R_WIDTH - 1.0) * 0.8 * aspect;
+            const u = (scanX * invRW - 1.0) * 0.8 * aspect;
             let rdX = dirX + rightX*u + upX*v;
             let rdY = dirY + rightY*u + upY*v;
             let rdZ = dirZ + rightZ*u + upZ*v;
-            const rdLen = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
-            rdX /= rdLen; rdY /= rdLen; rdZ /= rdLen;
+            const invLen = 1.0 / Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
+            rdX *= invLen; rdY *= invLen; rdZ *= invLen;
 
-            let mapX = Math.floor(px), mapY = Math.floor(py), mapZ = Math.floor(pz);
+            let mapX = px|0, mapY = py|0, mapZ = pz|0;
             const deltaX = Math.abs(1/rdX), deltaY = Math.abs(1/rdY), deltaZ = Math.abs(1/rdZ);
             const stepX = rdX<0?-1:1, stepY = rdY<0?-1:1, stepZ = rdZ<0?-1:1;
             let sideDistX = (rdX<0 ? px-mapX : mapX+1-px) * deltaX;
@@ -91,7 +91,7 @@ function loop() {
             let sideDistZ = (rdZ<0 ? pz-mapZ : mapZ+1-pz) * deltaZ;
 
             let hitBlock = 0, side = 0, dist = 0;
-            for (let i = 0; i < 40; i++) {
+            for (let i = 0; i < 48; i++) {
                 if (sideDistX < sideDistY) {
                     if (sideDistX < sideDistZ) { sideDistX += deltaX; mapX += stepX; side = 0; }
                     else                        { sideDistZ += deltaZ; mapZ += stepZ; side = 2; }
@@ -138,48 +138,23 @@ function loop() {
                 let shade = side===0?0.75:(side===1?0.6:(stepZ>0?0.4:1.0));
                 let shadeFog = shade*(1.0-dist*0.04);
                 if(shadeFog<0) shadeFog=0;
-                if(hitBlock===4){r*=1.3;g*=1.3;}else{r*=shadeFog;g*=shadeFog;b*=shadeFog;}
-                finalColor = ARGB(r|0,g|0,b|0);
+                if(hitBlock===4){r=(r*1.3)|0;g=(g*1.3)|0;}else{r=(r*shadeFog)|0;g=(g*shadeFog)|0;b=(b*shadeFog)|0;}
+                finalColor = ARGB(r,g,b);
             } else if (hitBlock===0) {
                 const sky=(rdZ>0?rdZ:0)*200|0;
-                finalColor = ARGB(sky/2, sky, 255);
+                finalColor = ARGB(sky>>1, sky, 255);
             }
 
-            // Write directly into shared pixel buffer - no transfer!
-            sharedPixels[scanX + scanY * R_WIDTH] = finalColor;
+            sharedPixels[rowBase + scanX] = finalColor;
         }
     }
 
-    // Signal done then loop back to wait
-    Atomics.store(stateI32, 20 + myId, 0);
-    Atomics.notify(stateI32, 20 + myId, 1);
-    loop();
+    // Signal completion via postMessage — no Atomics.wait needed on main thread
+    self.postMessage({ type: 'done' });
 }
 </script>
 
 <script>
-const errorLog = document.getElementById('errorLog');
-const diagLog = document.getElementById('diagLog');
-
-function showError(msg) {
-    errorLog.style.display = 'block';
-    errorLog.textContent += msg + '\n';
-}
-function showDiag(msg) {
-    diagLog.innerHTML += msg + '<br>';
-}
-
-window.onerror = (msg, src, line) => showError(`JS Error: ${msg}\nLine: ${line}`);
-window.onunhandledrejection = (e) => showError(`Promise Error: ${e.reason}`);
-
-// Diagnostics
-try {
-    showDiag('SharedArrayBuffer: ' + (typeof SharedArrayBuffer !== 'undefined' ? '✅' : '❌'));
-    showDiag('Atomics: ' + (typeof Atomics !== 'undefined' ? '✅' : '❌'));
-    showDiag('crossOriginIsolated: ' + (crossOriginIsolated ? '✅' : '❌'));
-    showDiag('Worker: ' + (typeof Worker !== 'undefined' ? '✅' : '❌'));
-} catch(e) { showError('Diag error: ' + e); }
-
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d', { alpha: false });
 const R_WIDTH = 640, R_HEIGHT = 360;
@@ -187,7 +162,6 @@ canvas.width = R_WIDTH; canvas.height = R_HEIGHT;
 
 function ARGB(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
 
-// Shared texture buffer
 const TEX_SIZE = 64;
 const sharedTexBuf = new SharedArrayBuffer(5 * TEX_SIZE * TEX_SIZE * 4);
 const textures = new Uint32Array(sharedTexBuf);
@@ -202,7 +176,6 @@ for (let y = 0; y < TEX_SIZE; y++) {
     }
 }
 
-// Shared matcap buffer
 const MATCAP_SIZE = 128;
 const sharedMatBuf = new SharedArrayBuffer(MATCAP_SIZE * MATCAP_SIZE * 4);
 const matcap = new Uint32Array(sharedMatBuf);
@@ -220,18 +193,12 @@ for (let y = 0; y < MATCAP_SIZE; y++) {
     }
 }
 
-// Shared world buffer - workers read block changes directly, no messaging needed
 const MW=32, MH=32, MD=16;
 const sharedWorldBuf = new SharedArrayBuffer(MW*MH*MD);
 const world = new Uint8Array(sharedWorldBuf);
 
-var workers = [];
-
 function getBlock(x,y,z) { return (x<0||x>=MW||y<0||y>=MH||z<0||z>=MD)?0:world[x+y*MW+z*MW*MH]; }
-function setBlock(x,y,z,id) {
-    // Workers read sharedWorldBuf directly - just write, no postMessage needed
-    if(x>=0&&x<MW&&y>=0&&y<MH&&z>=0&&z<MD) world[x+y*MW+z*MW*MH]=id;
-}
+function setBlock(x,y,z,id) { if(x>=0&&x<MW&&y>=0&&y<MH&&z>=0&&z<MD) world[x+y*MW+z*MW*MH]=id; }
 
 for(let z=0;z<MD;z++) for(let y=0;y<MH;y++) for(let x=0;x<MW;x++){
     if(z===0) setBlock(x,y,z,1);
@@ -243,15 +210,7 @@ for(let x=9;x<=11;x++) for(let y=5;y<=7;y++){setBlock(x,y,1,1);setBlock(x,y,2,1)
 
 const sphere={x:16.5,y:16.5,z:3.5,radius:1.5};
 
-// Shared pixel buffer - workers write pixels here directly, main thread blits it
 const sharedPixelBuf = new SharedArrayBuffer(R_WIDTH * R_HEIGHT * 4);
-
-// Shared state buffer: Float64[0..9]=player+time+sphere, Int32[20..20+N]=per-worker flags
-const sharedStateBuf = new SharedArrayBuffer(256);
-const stateF64 = new Float64Array(sharedStateBuf);
-const stateI32 = new Int32Array(sharedStateBuf);
-
-// Player
 const player={x:2.5,y:2.5,z:1.5,yaw:Math.PI/4,pitch:0,vz:0,grounded:false,radius:0.2,eyeHeight:0.8,height:1.2};
 const keys={w:false,a:false,s:false,d:false,space:false};
 
@@ -266,7 +225,7 @@ document.addEventListener('mousemove', e=>{
 canvas.addEventListener('mousedown', e=>{
     if(document.pointerLockElement!==canvas) return;
     let dX=Math.cos(player.yaw)*Math.cos(player.pitch),dY=Math.sin(player.yaw)*Math.cos(player.pitch),dZ=Math.sin(player.pitch);
-    let mX=Math.floor(player.x),mY=Math.floor(player.y),mZ=Math.floor(player.z);
+    let mX=player.x|0,mY=player.y|0,mZ=player.z|0;
     let delX=Math.abs(1/dX),delY=Math.abs(1/dY),delZ=Math.abs(1/dZ);
     let stX=dX<0?-1:1,stY=dY<0?-1:1,stZ=dZ<0?-1:1;
     let sdX=(dX<0?player.x-mX:mX+1-player.x)*delX,sdY=(dY<0?player.y-mY:mY+1-player.y)*delY,sdZ=(dZ<0?player.z-mZ:mZ+1-player.z)*delZ;
@@ -312,56 +271,68 @@ function updatePhysics(){
     }else{player.z=nZ;player.grounded=false;}
 }
 
-// Spawn workers
+// Workers signal completion via postMessage — zero Atomics.wait on main thread
 const NUM_WORKERS = Math.min(8, navigator.hardwareConcurrency || 4);
-const workerURL = 'data:application/javascript;base64,' + btoa(unescape(encodeURIComponent(document.getElementById('workerCode').textContent)));
+const workerSrc = document.getElementById('workerCode').textContent;
+const workerURL = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
+const workers = [];
+
+const sharedPixelsView = new Uint8ClampedArray(sharedPixelBuf);
+const localPixelBuf = new Uint8ClampedArray(R_WIDTH * R_HEIGHT * 4);
+const imgData = new ImageData(localPixelBuf, R_WIDTH, R_HEIGHT);
+const fpsEl = document.getElementById('fps');
+let frameCount = 0, lastFpsTime = performance.now();
+let doneCount = 0;
+let rendering = false;
+
+function onWorkerDone() {
+    doneCount++;
+    if (doneCount === NUM_WORKERS) {
+        localPixelBuf.set(sharedPixelsView);
+        ctx.putImageData(imgData, 0, 0);
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+            fpsEl.textContent = (frameCount * 1000 / (now - lastFpsTime) | 0) + ' FPS';
+            frameCount = 0; lastFpsTime = now;
+        }
+        rendering = false;
+        requestAnimationFrame(dispatchFrame);
+    }
+}
 
 for(let i=0;i<NUM_WORKERS;i++){
     const startY=Math.floor(i*R_HEIGHT/NUM_WORKERS);
     const endY  =i===NUM_WORKERS-1?R_HEIGHT:Math.floor((i+1)*R_HEIGHT/NUM_WORKERS);
-    const w=new Worker(workerURL);
+    const w = new Worker(workerURL);
+    w.onmessage = onWorkerDone;
     workers.push(w);
     w.postMessage({
         type:'init', myId:i, myStartY:startY, myEndY:endY,
         R_WIDTH, R_HEIGHT, TEX_SIZE, MW, MH, MD, MATCAP_SIZE,
         sharedPixels:   sharedPixelBuf,
-        sharedState:    sharedStateBuf,
+        sharedState:    new SharedArrayBuffer(8), // unused but kept for compat
         sharedWorld:    sharedWorldBuf,
         sharedTextures: sharedTexBuf,
         sharedMatcap:   sharedMatBuf,
     });
 }
 
-// ImageData must use a non-shared buffer — copy from shared each frame
-const sharedPixelsView = new Uint8ClampedArray(sharedPixelBuf);
-const localPixelBuf = new Uint8ClampedArray(R_WIDTH * R_HEIGHT * 4);
-const imgData = new ImageData(localPixelBuf, R_WIDTH, R_HEIGHT);
-
 function dispatchFrame() {
+    if (rendering) return;
+    rendering = true;
+    doneCount = 0;
     updatePhysics();
 
-    stateF64[0]=player.x; stateF64[1]=player.y; stateF64[2]=player.z;
-    stateF64[3]=player.yaw; stateF64[4]=player.pitch;
-    stateF64[5]=performance.now()*0.005;
-    stateF64[6]=sphere.x; stateF64[7]=sphere.y; stateF64[8]=sphere.z; stateF64[9]=sphere.radius;
+    const payload = {
+        type: 'render',
+        px: player.x, py: player.y, pz: player.z,
+        yaw: player.yaw, pitch: player.pitch,
+        time: performance.now() * 0.005,
+        sphX: sphere.x, sphY: sphere.y, sphZ: sphere.z, sphR: sphere.radius
+    };
 
-    // Wake all workers
-    for(let i=0;i<NUM_WORKERS;i++){
-        Atomics.store(stateI32, 20+i, 1);
-        Atomics.notify(stateI32, 20+i, 1);
-    }
-
-    // Wait for all workers asynchronously (main thread cannot block)
-    const waits = [];
-    for(let i=0;i<NUM_WORKERS;i++){
-        waits.push(Atomics.waitAsync(stateI32, 20+i, 1).value);
-    }
-
-    Promise.all(waits).then(() => {
-        localPixelBuf.set(sharedPixelsView);
-        ctx.putImageData(imgData, 0, 0);
-        requestAnimationFrame(dispatchFrame);
-    });
+    for(let i=0;i<NUM_WORKERS;i++) workers[i].postMessage(payload);
 }
 
 dispatchFrame();
