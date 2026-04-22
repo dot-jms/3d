@@ -203,8 +203,10 @@ for(let x=9;x<=11;x++) for(let y=5;y<=7;y++){setBlock(x,y,1,1);setBlock(x,y,2,1)
 const sphere={x:16.5,y:16.5,z:3.5,radius:1.5};
 
 const sharedPixelBuf = new SharedArrayBuffer(R_WIDTH * R_HEIGHT * 4);
-// Write directly from SharedArrayBuffer — no copy needed
-const imgData = new ImageData(new Uint8ClampedArray(sharedPixelBuf), R_WIDTH, R_HEIGHT);
+// SharedArrayBuffer can't be used directly in ImageData in most browsers — copy per frame instead
+const pixelReadBuf = new Uint8ClampedArray(R_WIDTH * R_HEIGHT * 4);
+const sharedPixelView = new Uint8ClampedArray(sharedPixelBuf);
+const imgData = new ImageData(pixelReadBuf, R_WIDTH, R_HEIGHT);
 
 // Shared params buffer: workers read camera state from here each frame (no postMessage payload)
 const sharedParamsBuf = new SharedArrayBuffer(20 * 8); // 20 Float64s
@@ -280,7 +282,8 @@ let doneCount = 0, rendering = false;
 
 function onWorkerDone() {
     if (++doneCount === NUM_WORKERS) {
-        // No copy — ImageData wraps sharedPixelBuf directly
+        // Copy from SharedArrayBuffer to regular buffer (required for putImageData)
+        pixelReadBuf.set(sharedPixelView);
         ctx.putImageData(imgData, 0, 0);
         frameCount++;
         const now = performance.now();
