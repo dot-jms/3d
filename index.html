@@ -28,7 +28,7 @@
 
 <script id="workerCode" type="javascript/worker">
 let R_WIDTH, R_HEIGHT, TEX_SIZE, MW, MH, MD, MATCAP_SIZE;
-let sharedPixels, stateF64, stateI32, sharedWorld, sharedTextures, sharedMatcap;
+let sharedPixels, sharedWorld, sharedTextures, sharedMatcap;
 let myId, myStartY, myEndY;
 
 function ARGB(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
@@ -38,14 +38,12 @@ self.onmessage = function(e) {
     if (d.type === 'init') {
         ({ R_WIDTH, R_HEIGHT, TEX_SIZE, MW, MH, MD, MATCAP_SIZE, myId, myStartY, myEndY } = d);
         sharedPixels   = new Uint32Array(d.sharedPixels);
-        stateF64       = new Float64Array(d.sharedState);
-        stateI32       = new Int32Array(d.sharedState);
         sharedWorld    = new Uint8Array(d.sharedWorld);
         sharedTextures = new Uint32Array(d.sharedTextures);
         sharedMatcap   = new Uint32Array(d.sharedMatcap);
 
-        // FIX 1: Magma texture animation runs independently of rendering.
-        // Worker 0 updates it on its own timer so it never blocks row rendering.
+        // FIX 1: Magma texture animates on its own timer, decoupled from rendering.
+        // Previously this blocked worker 0 from drawing its scanlines each frame.
         if (myId === 0) {
             setInterval(() => {
                 const t = performance.now() * 0.005;
@@ -53,7 +51,7 @@ self.onmessage = function(e) {
                     const wave = Math.sin((i % 64) * 0.2 + t) + Math.cos((i >> 6) * 0.2 + t);
                     sharedTextures[i + 4 * 4096] = ARGB((200 + wave * 55) | 0, Math.max(0, (50 + wave * 25) | 0), 0);
                 }
-            }, 33); // ~30fps texture update, independent of render
+            }, 33);
         }
 
         self.onmessage = onRender;
@@ -62,37 +60,25 @@ self.onmessage = function(e) {
 
 function onRender(e) {
     if (e.data.type !== 'render') return;
+
+    // FIX 2: Receive pre-computed values from main thread instead of each worker
+    // redundantly calling Math.cos/sin and recomputing sphere constants.
     const {
-        px, py, pz, yaw, pitch,
-        sphX, sphY, sphZ, sphR,
-        // FIX 2: Main thread pre-computes basis vectors and sphere screen bounds,
-        // sent once per frame instead of recomputed per worker call.
+        px, py, pz,
         dirX, dirY, dirZ,
         rightX, rightY, rightZ,
         upX, upY, upZ,
-        // Screen-space bounding box for sphere (pixel coordinates)
-        sphMinY, sphMaxY, sphMinX, sphMaxX,
-        // Pre-computed sphere ray-origin terms (constant across all pixels)
-        ocX, ocY, ocZ, sphereC,
-        invRad,
-        aspect, invRW, invRH
+        aspect, invRW, invRH,
+        ocX, ocY, ocZ, sphereC, invRad
     } = e.data;
 
     for (let scanY = myStartY; scanY < myEndY; scanY++) {
         const v = (1.0 - scanY * invRH) * 0.8;
         const rowBase = scanY * R_WIDTH;
 
-        // FIX 3: Check if this scanline is within the sphere's screen-space bounding box.
-        // If not, skip the sphere intersection entirely for the whole row.
-        const rowCanHitSphere = (scanY >= sphMinY && scanY <= sphMaxY);
-
         for (let scanX = 0; scanX < R_WIDTH; scanX++) {
             const u = (scanX * invRW - 1.0) * 0.8 * aspect;
 
-            // FIX 4: Ray direction is built from pre-normalized basis (no per-pixel sqrt needed).
-            // dirX/rightX/upX are already orthonormal; combining them with u,v stays unit-length
-            // because we're just rotating a unit vector. The 0.8 FOV factor is small enough that
-            // we re-normalize — but only once, as before. The real win is the sphere cull below.
             let rdX = dirX + rightX*u + upX*v;
             let rdY = dirY + rightY*u + upY*v;
             let rdZ = dirZ + rightZ*u + upZ*v;
@@ -123,26 +109,21 @@ function onRender(e) {
                 }
             }
 
+            const bDot = ocX*rdX + ocY*rdY + ocZ*rdZ;
+            const h = bDot*bDot - sphereC;
             let finalColor = 0xFF000000;
 
-            // FIX 3 (continued): Only test sphere intersection if this pixel is within
-            // the sphere's screen-space bounding box. Pixels outside skip all sphere math.
-            if (rowCanHitSphere && scanX >= sphMinX && scanX <= sphMaxX) {
-                const bDot = ocX*rdX + ocY*rdY + ocZ*rdZ;
-                const h = bDot*bDot - sphereC;
-
-                if (h > 0) {
-                    const t = -bDot - Math.sqrt(h);
-                    if (t > 0 && (hitBlock===0 || t < dist)) {
-                        const nx=(ocX+rdX*t)*invRad, ny=(ocY+rdY*t)*invRad, nz=(ocZ+rdZ*t)*invRad;
-                        const matU = nx*rightX + ny*rightY + nz*rightZ;
-                        const matV = nx*upX    + ny*upY    + nz*upZ;
-                        let mu=((matU*0.5+0.5)*MATCAP_SIZE)|0, mv=((-matV*0.5+0.5)*MATCAP_SIZE)|0;
-                        if(mu<0)mu=0; if(mu>=MATCAP_SIZE)mu=MATCAP_SIZE-1;
-                        if(mv<0)mv=0; if(mv>=MATCAP_SIZE)mv=MATCAP_SIZE-1;
-                        finalColor = sharedMatcap[mu + mv*MATCAP_SIZE];
-                        hitBlock = -1;
-                    }
+            if (h > 0) {
+                const t = -bDot - Math.sqrt(h);
+                if (t > 0 && (hitBlock===0 || t < dist)) {
+                    const nx=(ocX+rdX*t)*invRad, ny=(ocY+rdY*t)*invRad, nz=(ocZ+rdZ*t)*invRad;
+                    const matU = nx*rightX + ny*rightY + nz*rightZ;
+                    const matV = nx*upX    + ny*upY    + nz*upZ;
+                    let mu=((matU*0.5+0.5)*MATCAP_SIZE)|0, mv=((-matV*0.5+0.5)*MATCAP_SIZE)|0;
+                    if(mu<0)mu=0; if(mu>=MATCAP_SIZE)mu=MATCAP_SIZE-1;
+                    if(mv<0)mv=0; if(mv>=MATCAP_SIZE)mv=MATCAP_SIZE-1;
+                    finalColor = sharedMatcap[mu + mv*MATCAP_SIZE];
+                    hitBlock = -1;
                 }
             }
 
@@ -291,46 +272,6 @@ function updatePhysics(){
     }else{player.z=nZ;player.grounded=false;}
 }
 
-// Pre-compute sphere screen-space bounding box on the main thread once per frame.
-// Workers receive pixel-space min/max X/Y so they can skip sphere math for out-of-bounds pixels.
-function computeSphereScreenBounds(dirX, dirY, dirZ, rightX, rightY, rightZ, upX, upY, upZ, aspect,
-                                    px, py, pz, sphX, sphY, sphZ, sphR) {
-    // Vector from camera to sphere center
-    const toCX = sphX - px, toCY = sphY - py, toCZ = sphZ - pz;
-    const dotDir = toCX*dirX + toCY*dirY + toCZ*dirZ;
-
-    // Sphere fully behind camera — skip intersection for all pixels
-    if (dotDir - sphR <= 0) {
-        return { sphMinX: 0, sphMaxX: R_WIDTH - 1, sphMinY: 0, sphMaxY: R_HEIGHT - 1 };
-    }
-
-    // Project sphere center onto right/up axes, then divide by forward distance (perspective divide)
-    const dotRight = toCX*rightX + toCY*rightY + toCZ*rightZ;
-    const dotUp    = toCX*upX    + toCY*upY    + toCZ*upZ;
-    const invDotDir = 1.0 / dotDir;
-    const centerU = dotRight * invDotDir;  // in view-space [-1..1] horizontal
-    const centerV = dotUp    * invDotDir;  // in view-space [-1..1] vertical
-
-    // Convert from view-space to pixel coords matching the renderer's UV formula:
-    //   u = (scanX * invRW - 1.0) * 0.8 * aspect  =>  scanX = (centerU/(0.8*aspect) + 1) * R_WIDTH/2
-    //   v = (1 - scanY * invRH) * 0.8             =>  scanY = (1 - centerV/0.8) * R_HEIGHT/2
-    const screenX = (centerU / (0.8 * aspect) + 1.0) * R_WIDTH  * 0.5;
-    const screenY = (1.0 - centerV / 0.8)             * R_HEIGHT * 0.5;
-
-    // Angular radius → pixel radius (conservative +30% margin)
-    const dist = Math.sqrt(toCX*toCX + toCY*toCY + toCZ*toCZ);
-    const angularR = sphR / dist;
-    const pixelRX = (angularR / (0.8 * aspect)) * R_WIDTH  * 1.3;
-    const pixelRY = (angularR / 0.8)            * R_HEIGHT * 1.3;
-
-    return {
-        sphMinX: Math.max(0,          (screenX - pixelRX) | 0),
-        sphMaxX: Math.min(R_WIDTH-1,  (screenX + pixelRX + 1) | 0),
-        sphMinY: Math.max(0,          (screenY - pixelRY) | 0),
-        sphMaxY: Math.min(R_HEIGHT-1, (screenY + pixelRY + 1) | 0),
-    };
-}
-
 const NUM_WORKERS = Math.min(8, navigator.hardwareConcurrency || 4);
 const workerSrc = document.getElementById('workerCode').textContent;
 const workerURL = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
@@ -383,38 +324,29 @@ function dispatchFrame() {
     doneCount = 0;
     updatePhysics();
 
-    const { px, py, pz, yaw, pitch } = player;
+    const { x: px, y: py, z: pz, yaw, pitch } = player;
     const { x: sphX, y: sphY, z: sphZ, radius: sphR } = sphere;
 
-    const cosYaw   = Math.cos(yaw),   sinYaw   = Math.sin(yaw);
-    const cosPitch = Math.cos(pitch),  sinPitch = Math.sin(pitch);
-    const dirX = cosYaw*cosPitch,   dirY = sinYaw*cosPitch,  dirZ = sinPitch;
-    const rightX = sinYaw,           rightY = -cosYaw,        rightZ = 0;
+    // Pre-compute once on main thread — sent to all workers, no redundant trig per worker
+    const cosYaw = Math.cos(yaw), sinYaw = Math.sin(yaw);
+    const cosPitch = Math.cos(pitch), sinPitch = Math.sin(pitch);
+    const dirX = cosYaw*cosPitch, dirY = sinYaw*cosPitch, dirZ = sinPitch;
+    const rightX = sinYaw, rightY = -cosYaw, rightZ = 0;
     const upX = rightY*dirZ, upY = rightZ*dirX - rightX*dirZ, upZ = rightX*dirY - rightY*dirX;
     const aspect = R_WIDTH / R_HEIGHT;
     const invRW = 2.0 / R_WIDTH, invRH = 2.0 / R_HEIGHT;
-
-    // Pre-compute sphere ray-origin terms (same for all pixels/workers)
     const ocX = px - sphX, ocY = py - sphY, ocZ = pz - sphZ;
     const sphereC = ocX*ocX + ocY*ocY + ocZ*ocZ - sphR*sphR;
     const invRad = 1.0 / sphR;
 
-    const bounds = computeSphereScreenBounds(dirX, dirY, dirZ, rightX, rightY, rightZ, upX, upY, upZ, aspect,
-                                              px, py, pz, sphX, sphY, sphZ, sphR);
-
     const payload = {
         type: 'render',
-        px, py, pz, yaw, pitch,
-        sphX, sphY, sphZ, sphR,
-        // Pre-computed basis (saves trig in workers)
+        px, py, pz,
         dirX, dirY, dirZ,
         rightX, rightY, rightZ,
         upX, upY, upZ,
-        // Pre-computed sphere constants
-        ocX, ocY, ocZ, sphereC, invRad,
         aspect, invRW, invRH,
-        // Screen-space bounding box for sphere
-        ...bounds
+        ocX, ocY, ocZ, sphereC, invRad
     };
 
     for(let i=0;i<NUM_WORKERS;i++) workers[i].postMessage(payload);
